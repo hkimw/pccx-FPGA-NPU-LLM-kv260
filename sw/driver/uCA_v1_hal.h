@@ -1,3 +1,7 @@
+// PCCX(TM) — reusable AI accelerator project.
+// SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+// SPDX-License-Identifier: Apache-2.0
+
 // ===| uCA HAL (Hardware Abstraction Layer) |=====================================
 // Low-level AXI-Lite MMIO register access for the uCA NPU.
 // This layer owns all physical address reads/writes.

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# PCCX(TM) — reusable AI accelerator project.
+# SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+# SPDX-License-Identifier: Apache-2.0
+
 # Guard against committing heavyweight artifacts, private paths, or secrets.
 
 set -Eeuo pipefail

@@ -1,3 +1,7 @@
+// PCCX(TM) — reusable AI accelerator project.
+// SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+// SPDX-License-Identifier: Apache-2.0
+
 // ===| uCA API Implementation |==================================================
 // Builds 64-bit VLIW instructions from structured arguments and issues them
 // to the NPU via the HAL. Encoding per pccx v002 ISA:

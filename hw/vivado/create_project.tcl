@@ -1,3 +1,7 @@
+# PCCX(TM) — reusable AI accelerator project.
+# SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+# SPDX-License-Identifier: Apache-2.0
+
 # =============================================================================
 # create_project.tcl — builds the pccx v002 Vivado project for KV260.
 #

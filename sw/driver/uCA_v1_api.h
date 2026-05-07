@@ -1,3 +1,7 @@
+// PCCX(TM) — reusable AI accelerator project.
+// SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+// SPDX-License-Identifier: Apache-2.0
+
 // ===| uCA API (High-Level Driver Interface) |====================================
 // uCA: micro Compute Architecture — AI model acceleration API for FPGA NPU.
 //

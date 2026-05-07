@@ -1,3 +1,7 @@
+// PCCX(TM) — reusable AI accelerator project.
+// SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+// SPDX-License-Identifier: Apache-2.0
+
 // ===| uCA HAL Implementation |==================================================
 // AXI-Lite MMIO access for bare-metal KV260.
 // Direct pointer-based memory-mapped I/O — no OS, no mmap, no syscalls.

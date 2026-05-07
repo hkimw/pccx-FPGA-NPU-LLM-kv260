@@ -1,3 +1,7 @@
+# PCCX(TM) — reusable AI accelerator project.
+# SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+# SPDX-License-Identifier: Apache-2.0
+
 name: repo-validate
 
 # Lightweight always-run gate. Fast, decisive, no external installs.

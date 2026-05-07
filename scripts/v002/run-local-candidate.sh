@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# PCCX(TM) — reusable AI accelerator project.
+# SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+# SPDX-License-Identifier: Apache-2.0
+
 # Run local v002 candidate checks that do not require a board.
 #
 # Logs are written under hw/build/ so run evidence stays out of git.
