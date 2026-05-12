@@ -1,0 +1,26 @@
+name: Issue
+description: Report a bug, documentation gap, or scoped task.
+title: "[Issue]: "
+labels: []
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the issue or requested change.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Include affected files, commands, logs, or links when relevant.
+    validations:
+      required: false
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: Note any checks already run.
+    validations:
+      required: false
