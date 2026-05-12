@@ -1,0 +1,72 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+---------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2025.2 (lin64) Build 6299465 Fri Nov 14 12:34:56 MST 2025
+| Date         : Tue May 12 23:13:37 2026
+| Host         : hwkim-Swift-SF314-42 running 64-bit Ubuntu 24.04.4 LTS
+| Command      : report_drc -file /home/hwkim/Desktop/github/pccxai/worktrees/kv260-l2-uram-srl-candidate/hw/build/reports/drc_post_impl.rpt
+| Design       : NPU_top
+| Device       : xck26-sfvc784-2LV-c
+| Speed File   : -2LV
+| Design State : Fully Routed
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+Report DRC
+
+Table of Contents
+-----------------
+1. REPORT SUMMARY
+2. REPORT DETAILS
+
+1. REPORT SUMMARY
+-----------------
+            Netlist: netlist
+          Floorplan: impl_1
+      Design limits: <entire design considered>
+           Ruledeck: default
+             Max checks: <unlimited>
+             Checks found: 4
++-----------+----------+------------------------+--------+
+| Rule      | Severity | Description            | Checks |
++-----------+----------+------------------------+--------+
+| DPOP-4    | Warning  | MREG Output pipelining | 3      |
+| RTSTAT-10 | Warning  | No routable loads      | 1      |
++-----------+----------+------------------------+--------+
+
+2. REPORT DETAILS
+-----------------
+DPOP-4#1 Warning
+MREG Output pipelining  
+DSP u_CVO_top/u_CVO_sfu_unit/exp_s1_y_wire multiplier stage u_CVO_top/u_CVO_sfu_unit/exp_s1_y_wire/P[47:0] is not pipelined (MREG=0). Pipelining the multiplier function will improve performance and will save significant power so it is suggested whenever possible to fully pipeline this function.  If this multiplier was inferred, it is suggested to describe an additional register stage after this function.  If there is no registered adder/accumulator following the multiply function, two pipeline stages are suggested to allow both the MREG and PREG registers to be used.  If the DSP48 was instantiated in the design, it is suggested to set both the MREG and PREG attributes to 1 when performing multiply functions.
+Related violations: <none>
+
+DPOP-4#2 Warning
+MREG Output pipelining  
+DSP u_CVO_top/u_CVO_sfu_unit/gelu_e0_y_wire multiplier stage u_CVO_top/u_CVO_sfu_unit/gelu_e0_y_wire/P[47:0] is not pipelined (MREG=0). Pipelining the multiplier function will improve performance and will save significant power so it is suggested whenever possible to fully pipeline this function.  If this multiplier was inferred, it is suggested to describe an additional register stage after this function.  If there is no registered adder/accumulator following the multiply function, two pipeline stages are suggested to allow both the MREG and PREG registers to be used.  If the DSP48 was instantiated in the design, it is suggested to set both the MREG and PREG attributes to 1 when performing multiply functions.
+Related violations: <none>
+
+DPOP-4#3 Warning
+MREG Output pipelining  
+DSP u_mem_dispatcher/load_s6_elem_low20_reg multiplier stage u_mem_dispatcher/load_s6_elem_low20_reg/P[47:0] is not pipelined (MREG=0). Pipelining the multiplier function will improve performance and will save significant power so it is suggested whenever possible to fully pipeline this function.  If this multiplier was inferred, it is suggested to describe an additional register stage after this function.  If there is no registered adder/accumulator following the multiply function, two pipeline stages are suggested to allow both the MREG and PREG registers to be used.  If the DSP48 was instantiated in the design, it is suggested to set both the MREG and PREG attributes to 1 when performing multiply functions.
+Related violations: <none>
+
+RTSTAT-10#1 Warning
+No routable loads  
+1023 net(s) have no routable loads. The problem bus(es) and/or net(s) are u_HP_buffer/u_hp0_weight_fifo/xpm_fifo_base_inst/gen_sdpram.xpm_memory_base_inst/doutb[163:0],
+u_HP_buffer/u_hp1_weight_fifo/xpm_fifo_base_inst/gen_sdpram.xpm_memory_base_inst/doutb[163:0],
+u_HP_buffer/u_hp2_weight_fifo/xpm_fifo_base_inst/gen_sdpram.xpm_memory_base_inst/doutb[163:0],
+u_HP_buffer/u_hp3_weight_fifo/xpm_fifo_base_inst/gen_sdpram.xpm_memory_base_inst/doutb[163:0],
+u_fmap_pre/u_fmap_fifo/xpm_fifo_base_inst/gen_sdpram.xpm_memory_base_inst/doutb[0],
+u_fmap_pre/u_fmap_fifo/xpm_fifo_base_inst/gen_sdpram.xpm_memory_base_inst/doutb[15],
+u_fmap_pre/u_fmap_fifo/xpm_fifo_base_inst/gen_sdpram.xpm_memory_base_inst/doutb[1],
+u_fmap_pre/u_fmap_fifo/xpm_fifo_base_inst/gen_sdpram.xpm_memory_base_inst/doutb[2],
+u_fmap_pre/u_fmap_fifo/xpm_fifo_base_inst/gen_sdpram.xpm_memory_base_inst/doutb[3],
+u_fmap_pre/u_fmap_fifo/xpm_fifo_base_inst/gen_sdpram.xpm_memory_base_inst/doutb[4],
+u_fmap_pre/u_fmap_fifo/xpm_fifo_base_inst/gen_sdpram.xpm_memory_base_inst/doutb[5],
+u_fmap_pre/u_fmap_fifo/xpm_fifo_base_inst/gen_sdpram.xpm_memory_base_inst/doutb[6],
+u_mem_dispatcher/u_l2_cache/u_acp_cdc/u_acp_tx_fifo/xpm_fifo_base_inst/gen_sdpram.xpm_memory_base_inst/doutb[163:0],
+u_npu_controller_top/u_npu_frontend/u_cmd_in/u_cmd_q/S_AXIL_CTRL\\.awready,
+u_npu_controller_top/u_npu_frontend/u_stat_out/S_AXIL_CTRL\\.arready
+ (the first 15 of 208 listed nets/buses).
+Related violations: <none>
+
+

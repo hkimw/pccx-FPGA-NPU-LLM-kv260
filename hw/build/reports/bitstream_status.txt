@@ -1,0 +1,5 @@
+implementation_scope=OOC_ROUTE_ONLY
+bitstream_status=BITSTREAM_NOT_REQUESTED
+reason=impl mode stops at route_design for OOC timing evidence.
+full_top_level_flow=NOT_STARTED
+required_next_step=run ./vivado/build.sh top-status, then add a full top-level/BD bitstream flow before write_bitstream.

@@ -1,0 +1,27 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version      : Vivado v.2025.2 (lin64) Build 6299465 Fri Nov 14 12:34:56 MST 2025
+| Date              : Tue May 12 23:13:31 2026
+| Host              : hwkim-Swift-SF314-42 running 64-bit Ubuntu 24.04.4 LTS
+| Command           : report_clock_interaction -file /home/hwkim/Desktop/github/pccxai/worktrees/kv260-l2-uram-srl-candidate/hw/build/reports/clock_interaction_post_impl.rpt
+| Design            : NPU_top
+| Device            : xck26-sfvc784
+| Speed File        : -2LV  PRODUCTION 1.30 05-15-2022
+| Design State      : Routed
+| Temperature Grade : C
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Clock Interaction Report
+
+Clock Interaction Table
+-----------------------
+
+                            WNS                            TNS Failing  TNS Total    WNS Path         Clock-Pair           Inter-Clock          
+From Clock    To Clock      Clock Edges  WNS(ns)  TNS(ns)    Endpoints    Endpoints  Requirement(ns)  Classification       Constraints          
+------------  ------------  -----------  -------  -------  -----------  -----------  ---------------  -------------------  -------------------  
+axi_clk       axi_clk       rise - rise     0.16     0.00            0         2033             4.00  Clean                Timed                
+axi_clk       core_clk                                               0           64                   Ignored              Asynchronous Groups  
+core_clk      axi_clk                                                0           64                   Ignored              Asynchronous Groups  
+core_clk      core_clk      rise - rise     0.02     0.00            0        34216             2.50  Clean                Timed                
+
+
