@@ -21,12 +21,24 @@ create_clock -period 4.000 -name axi_clk   -waveform {0.000 2.000} [get_ports cl
 # Core compute clock — DSP48E2 array, GEMV lanes, CVO SFU.
 create_clock -period 2.500 -name core_clk  -waveform {0.000 1.250} [get_ports clk_core]
 
-# The two domains are genuinely asynchronous; every path across them is
-# expected to use a CDC FIFO or a properly-timed synchroniser. Mark them
-# as async so Vivado does not waste effort timing single-flop crossings.
-set_clock_groups -asynchronous \
-    -group [get_clocks axi_clk] \
-    -group [get_clocks core_clk]
+# Domain crossing rule.
+#
+# In OOC synthesis (when the create_clock above resolves) the two domains
+# are genuinely asynchronous and every path across them must use a CDC FIFO
+# or synchroniser - this set_clock_groups stops Vivado wasting effort on
+# them.
+#
+# In a wrapper-level run the OOC `clk_axi` / `core_clk` ports do not exist;
+# the wrapper ties both clk_axi and clk_core to the same PS clock
+# (`pl_clk0`), making the design effectively single-domain. The robust
+# filter below resolves to whichever clock names are present in the
+# current build (`axi_clk` / `core_clk` under OOC, `clk_pl_0*` /
+# `*clk_out2*` under the wrapper). Empty matches at wrapper level
+# produce a benign warning and have no functional effect because there
+# is no inter-domain path to constrain in a single-clock design.
+set_clock_groups -asynchronous -name pccx_async_axi_core \
+    -group [get_clocks -quiet -filter {NAME =~ "axi_clk*" || NAME =~ "clk_pl_0*" || NAME =~ "*pl_clk0*"}] \
+    -group [get_clocks -quiet -filter {NAME =~ "core_clk*" || NAME =~ "*clk_out2*"}]
 
 # ---------------------------------------------------------------------------
 # Reset synchronisers

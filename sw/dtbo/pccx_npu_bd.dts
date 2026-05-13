@@ -1,0 +1,27 @@
+/*
+ * pccx_npu_bd.dts - minimal device-tree overlay for the pccx v002 NPU
+ * BD-flow bitstream on KV260 SOM. Mirrors the May 9 known-working overlay:
+ * firmware-name + FPGA PR resets only, no child platform-device node.
+ * NPU control window is reached through the auto-created /dev/uioN entry
+ * for the loaded bitstream's fabric@A0000000 region.
+ *
+ * Loaded via:
+ *   sudo xmutil loadapp pccx_npu_bd
+ * after the files are copied to /lib/firmware/xilinx/pccx_npu_bd/.
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    fragment@0 {
+        target = <&fpga_full>;
+        __overlay__ {
+            #address-cells = <2>;
+            #size-cells = <2>;
+            firmware-name = "pccx_npu_bd.bit.bin";
+            resets = <&zynqmp_reset 116>, <&zynqmp_reset 117>,
+                     <&zynqmp_reset 118>, <&zynqmp_reset 119>;
+        };
+    };
+};

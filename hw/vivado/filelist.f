@@ -98,3 +98,4 @@ rtl/NPU_top.sv
 # Keeping it in the unified filelist means the BD owner does not have to
 # `add_files` it manually before packaging.
 vivado/npu_core_wrapper.sv
+vivado/npu_core_outer.v

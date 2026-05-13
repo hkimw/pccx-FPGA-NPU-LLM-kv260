@@ -147,3 +147,4 @@ vivado_pid*.str
 
 # Local task tracker — never tracked or pushed
 TODO.md
+sw/dtbo/build/
