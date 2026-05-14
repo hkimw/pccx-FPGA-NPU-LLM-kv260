@@ -603,16 +603,29 @@ if {![file exists $BD_FILE]} {
         connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]  [get_bd_pins $cell/s_axil_aresetn]
     }
 
+    # c_include_*=Basic on the unused side still exposes the channel's clock
+    # pins; tie them to the same clock/reset as the active channel so BD does
+    # not fail with BD 41-758 (unconnected clock source).
     foreach dm {weight_dm_hp0 weight_dm_hp1 weight_dm_hp2 weight_dm_hp3 fmap_dm_acp} {
         connect_bd_net [get_bd_pins zynq_ps/pl_clk0]             [get_bd_pins $dm/m_axi_mm2s_aclk]
         connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]  [get_bd_pins $dm/m_axi_mm2s_aresetn]
         connect_bd_net [get_bd_pins zynq_ps/pl_clk0]             [get_bd_pins $dm/m_axis_mm2s_cmdsts_aclk]
         connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]  [get_bd_pins $dm/m_axis_mm2s_cmdsts_aresetn]
+        # Orphan S2MM channel clocks (Basic mode keeps the pins but no traffic).
+        connect_bd_net [get_bd_pins zynq_ps/pl_clk0]             [get_bd_pins $dm/m_axi_s2mm_aclk]
+        connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]  [get_bd_pins $dm/m_axi_s2mm_aresetn]
+        connect_bd_net [get_bd_pins zynq_ps/pl_clk0]             [get_bd_pins $dm/m_axis_s2mm_cmdsts_awclk]
+        connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]  [get_bd_pins $dm/m_axis_s2mm_cmdsts_aresetn]
     }
     connect_bd_net [get_bd_pins zynq_ps/pl_clk0]                 [get_bd_pins result_dm_acp/m_axi_s2mm_aclk]
     connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]      [get_bd_pins result_dm_acp/m_axi_s2mm_aresetn]
     connect_bd_net [get_bd_pins zynq_ps/pl_clk0]                 [get_bd_pins result_dm_acp/m_axis_s2mm_cmdsts_awclk]
     connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]      [get_bd_pins result_dm_acp/m_axis_s2mm_cmdsts_aresetn]
+    # Orphan MM2S channel clocks on the S2MM-only DataMover.
+    connect_bd_net [get_bd_pins zynq_ps/pl_clk0]                 [get_bd_pins result_dm_acp/m_axi_mm2s_aclk]
+    connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]      [get_bd_pins result_dm_acp/m_axi_mm2s_aresetn]
+    connect_bd_net [get_bd_pins zynq_ps/pl_clk0]                 [get_bd_pins result_dm_acp/m_axis_mm2s_cmdsts_aclk]
+    connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]      [get_bd_pins result_dm_acp/m_axis_mm2s_cmdsts_aresetn]
 
     connect_bd_net [get_bd_pins zynq_ps/pl_clk0]                 [get_bd_pins zynq_ps/saxihp0_fpd_aclk]
     connect_bd_net [get_bd_pins zynq_ps/pl_clk0]                 [get_bd_pins zynq_ps/saxihp1_fpd_aclk]
