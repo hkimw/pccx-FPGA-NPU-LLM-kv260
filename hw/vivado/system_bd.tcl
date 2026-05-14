@@ -3,17 +3,14 @@
 # =============================================================================
 # system_bd.tcl — KV260 full top-level Block Design scaffold for the v002 NPU.
 #
-# Status      : SCAFFOLD. Reaches BD assembly + HDL wrapper generation. Full
-#               implementation + write_bitstream are gated behind a Timing
-#               constraints met check and require human-reviewed AXIS DMA
-#               connections (not provided by this scaffold).
+# Status      : BD-flow top-level assembly. Full implementation + write_bitstream
+#               are gated behind a Timing constraints met check. HP/ACP AXIS
+#               ports are wired through PS-issued AXI DataMover descriptors.
 #
 # Modes (set ::env(PCCX_BD_MODE) or pass tclargs):
 #   scaffold        : create BD project, package npu_core_outer, instantiate
-#                     Zynq MPSoC + ClockingWizard + npu_core_outer, generate
-#                     HDL wrapper. No DMA engines, no impl, no bitstream.
-#                     This is the safest default and what CI should use until
-#                     the human-reviewed DMA topology lands.
+#                     Zynq MPSoC + ClockingWizard + npu_core_outer + DataMover
+#                     topology, generate HDL wrapper. No impl, no bitstream.
 #   verify          : scaffold + run_synthesis only (no impl, no bitstream).
 #   closure_only    : scaffold + full implementation through route_design,
 #                     captures post-impl timing report, NEVER writes bitstream.
@@ -32,15 +29,10 @@
 #   * proc_sys_reset bridges (one per clock domain)
 #   * npu_core_outer IP packaged from hw/vivado/npu_core_outer.sv
 #   * AXI-Lite: PS HPM0_LPD (32-bit) -> SmartConnect (32->64) -> S_AXIL_CTRL
-#
-# NOT wired (HUMAN REVIEW REQUIRED before closure_only / bitstream)
-# -----------------------------------------------------------------
-#   * AXIS HP weight streams S_AXIS_HP[0..3]_WEIGHT (4x 128-bit)
-#       -> need AXI DataMover or AXI DMA per port reading from PS HP0..HP3
-#   * AXIS ACP fmap input  S_AXIS_ACP_FMAP (128-bit)
-#       -> need AXI DataMover reading from PS ACP (S_AXI_ACP_FPD) or HP4
-#   * AXIS ACP result out  M_AXIS_ACP_RESULT (128-bit)
-#       -> need AXIS-to-MM converter writing back via PS ACP / HP
+#   * AXI DataMover MM2S: HP0..HP3 weight streams
+#   * AXI DataMover MM2S: ACP fmap stream
+#   * AXI DataMover S2MM: ACP result write-back stream
+#   * AXI-Lite command/status register blocks for PS-issued descriptors
 # =============================================================================
 
 set HW_ROOT  [file normalize [file dirname [info script]]/..]
@@ -82,6 +74,53 @@ proc pccx_latest_vlnv {pattern} {
     }
     set sorted [lsort -dictionary [get_property VLNV $defs]]
     return [lindex $sorted end]
+}
+
+proc pccx_config_datamover_mm2s {cell_name} {
+    set_property -dict [list \
+        CONFIG.c_include_mm2s {Full} \
+        CONFIG.c_include_s2mm {Omit} \
+        CONFIG.c_single_interface {0} \
+        CONFIG.c_addr_width {32} \
+        CONFIG.c_m_axi_mm2s_data_width {128} \
+        CONFIG.c_m_axis_mm2s_tdata_width {128} \
+        CONFIG.c_mm2s_burst_size {16} \
+        CONFIG.c_mm2s_btt_used {23} \
+        CONFIG.c_include_mm2s_dre {false} \
+        CONFIG.c_include_mm2s_stsfifo {true} \
+        CONFIG.c_mm2s_stscmd_is_async {false} \
+        CONFIG.c_mm2s_stscmd_fifo_depth {8} \
+        CONFIG.c_enable_cache_user {false} \
+    ] [get_bd_cells $cell_name]
+}
+
+proc pccx_config_datamover_s2mm {cell_name} {
+    set_property -dict [list \
+        CONFIG.c_include_mm2s {Omit} \
+        CONFIG.c_include_s2mm {Full} \
+        CONFIG.c_single_interface {0} \
+        CONFIG.c_addr_width {32} \
+        CONFIG.c_m_axi_s2mm_data_width {128} \
+        CONFIG.c_s_axis_s2mm_tdata_width {128} \
+        CONFIG.c_s2mm_burst_size {16} \
+        CONFIG.c_s2mm_btt_used {23} \
+        CONFIG.c_include_s2mm_dre {false} \
+        CONFIG.c_include_s2mm_stsfifo {true} \
+        CONFIG.c_s2mm_stscmd_is_async {false} \
+        CONFIG.c_s2mm_stscmd_fifo_depth {8} \
+        CONFIG.c_s2mm_support_indet_btt {false} \
+        CONFIG.c_enable_cache_user {false} \
+    ] [get_bd_cells $cell_name]
+}
+
+proc pccx_config_cmdsts_axil {cell_name} {
+    set_property -dict [list \
+        CONFIG.AXIL_ADDR_W {12} \
+        CONFIG.AXIL_DATA_W {32} \
+        CONFIG.CMD_WIDTH {72} \
+        CONFIG.STS_WIDTH {8} \
+        CONFIG.FIFO_DEPTH {8} \
+    ] [get_bd_cells $cell_name]
 }
 
 # ---------------------------------------------------------------------------
@@ -293,9 +332,23 @@ if {[file exists $WRAPPER_STUB]} {
     puts "\[pccx\] WARNING: neither WRAPPER_STUB nor WRAPPER_DCP exists; create_bd_cell -reference may fail"
 }
 
+set CMDSTS_HELPER [file normalize $HW_ROOT/vivado/datamover_cmdsts_axil.sv]
+if {[file exists $CMDSTS_HELPER]} {
+    add_files -fileset sources_1 -norecurse $CMDSTS_HELPER
+    set _cmdsts_file [get_files -of_objects [get_filesets sources_1] $CMDSTS_HELPER]
+    if {$_cmdsts_file ne ""} {
+        set_property file_type SystemVerilog $_cmdsts_file
+    }
+    puts "\[pccx\] DataMover AXI-Lite command/status helper added"
+} else {
+    puts "\[pccx\] FATAL: missing DataMover command/status helper $CMDSTS_HELPER"
+    close_project
+    exit 5
+}
+
 # Set top BEFORE update_compile_order so the elaborator does not auto-elect
 # a different module as top from the small set we now have in sources_1.
-# (The src_files / .svh load was removed, so only stub + dcp are present.)
+# (The helper module above must not become the project top.)
 set_property top npu_core_outer [current_fileset]
 update_compile_order -fileset sources_1
 
@@ -313,7 +366,8 @@ if {![file exists $BD_FILE]} {
     set VLNV_PSRESET  [pccx_latest_vlnv "xilinx.com:ip:proc_sys_reset:*"]
     set VLNV_XLCONST  [pccx_latest_vlnv "xilinx.com:ip:xlconstant:*"]
     set VLNV_SMART    [pccx_latest_vlnv "xilinx.com:ip:smartconnect:*"]
-    puts "\[pccx\] resolved VLNV: PS=$VLNV_PS CLKWIZ=$VLNV_CLKWIZ RST=$VLNV_PSRESET CONST=$VLNV_XLCONST SC=$VLNV_SMART"
+    set VLNV_DM       [pccx_latest_vlnv "xilinx.com:ip:axi_datamover:*"]
+    puts "\[pccx\] resolved VLNV: PS=$VLNV_PS CLKWIZ=$VLNV_CLKWIZ RST=$VLNV_PSRESET CONST=$VLNV_XLCONST SC=$VLNV_SMART DM=$VLNV_DM"
 
     # PS — Zynq UltraScale+ MPSoC with KV260 preset
     create_bd_cell -type ip -vlnv $VLNV_PS zynq_ps
@@ -327,6 +381,15 @@ if {![file exists $BD_FILE]} {
         CONFIG.PSU__USE__M_AXI_GP1 {0} \
         CONFIG.PSU__USE__M_AXI_GP2 {0} \
         CONFIG.PSU__USE__S_AXI_GP0 {0} \
+        CONFIG.PSU__USE__S_AXI_GP2 {1} \
+        CONFIG.PSU__USE__S_AXI_GP3 {1} \
+        CONFIG.PSU__USE__S_AXI_GP4 {1} \
+        CONFIG.PSU__USE__S_AXI_GP5 {1} \
+        CONFIG.PSU__SAXIGP2__DATA_WIDTH {128} \
+        CONFIG.PSU__SAXIGP3__DATA_WIDTH {128} \
+        CONFIG.PSU__SAXIGP4__DATA_WIDTH {128} \
+        CONFIG.PSU__SAXIGP5__DATA_WIDTH {128} \
+        CONFIG.PSU__USE__S_AXI_ACP {1} \
     ] [get_bd_cells zynq_ps]
 
     # Clocking — PL_CLK0 fans out to ClockingWizard which produces 250 MHz
@@ -438,10 +501,9 @@ if {![file exists $BD_FILE]} {
     # Strategy: leave the u_npu interface FREQ_HZ / CLK_DOMAIN unset before
     # connection, then *after* connect_bd_intf_net runs, copy the master's
     # already-propagated values onto u_npu's interface pin. This works for
-    # connected interfaces (s_axil via SmartConnect). Unconnected interfaces
-    # (s_axis_hp[0..3], s_axis_acp_*) become BD external pins so their
-    # FREQ_HZ is set to the clk_wiz output frequency the human-review block
-    # below will eventually drive them with.
+    # connected interfaces (s_axil via SmartConnect, and HP/ACP streams via
+    # DataMover). The manual settings below keep module-reference AXIS pins in
+    # the same single-clock PL domain.
 
     # i_clear — held low (no soft clear) by default; expose to PS GPIO if/when
     # software needs it.
@@ -455,7 +517,7 @@ if {![file exists $BD_FILE]} {
     # AXI4-Lite — the ipx::infer_bus_interfaces calls during packaging
     # ensure that.
     create_bd_cell -type ip -vlnv $VLNV_SMART sc_axil
-    set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] [get_bd_cells sc_axil]
+    set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {7}] [get_bd_cells sc_axil]
     # M_AXI_HPM0_FPD is the canonical KV260 / Zynq UltraScale+ MPSoC PL-side
     # AXI master pin (Full Power Domain). The legacy "LPD" suffix refers to
     # Low Power Domain which is not the path used for PL register access.
@@ -469,6 +531,123 @@ if {![file exists $BD_FILE]} {
     # → no cross-clock-domain logic needed inside SmartConnect (simpler timing).
     connect_bd_net      [get_bd_pins zynq_ps/pl_clk0]             [get_bd_pins sc_axil/aclk]
     connect_bd_net      [get_bd_pins rst_axi/peripheral_aresetn]  [get_bd_pins sc_axil/aresetn]
+
+    # ------------------------------------------------------------------------
+    # HP/ACP AXIS DataMover topology.
+    # ------------------------------------------------------------------------
+    create_bd_cell -type ip -vlnv $VLNV_XLCONST const_axis_keep16
+    set_property -dict [list CONFIG.CONST_VAL {65535} CONFIG.CONST_WIDTH {16}] \
+        [get_bd_cells const_axis_keep16]
+
+    create_bd_cell -type ip -vlnv $VLNV_SMART sc_acp
+    set_property -dict [list CONFIG.NUM_SI {2} CONFIG.NUM_MI {1}] [get_bd_cells sc_acp]
+
+    # TODO(weight_dm_hp0): HP0 carries one bandwidth-oriented 128-bit weight
+    # stream. Revisit FIFO depth, max burst length, and tag allocation once the
+    # PS-side descriptor issuer has measured sustained DDR read behavior.
+    create_bd_cell -type ip -vlnv $VLNV_DM weight_dm_hp0
+    pccx_config_datamover_mm2s weight_dm_hp0
+    create_bd_cell -type module -reference datamover_cmdsts_axil cmdsts_hp0
+    pccx_config_cmdsts_axil cmdsts_hp0
+
+    # TODO(weight_dm_hp1): Mirrors HP0 so each weight lane can be scheduled
+    # independently. Burst size and command FIFO depth are first-pass values.
+    create_bd_cell -type ip -vlnv $VLNV_DM weight_dm_hp1
+    pccx_config_datamover_mm2s weight_dm_hp1
+    create_bd_cell -type module -reference datamover_cmdsts_axil cmdsts_hp1
+    pccx_config_cmdsts_axil cmdsts_hp1
+
+    # TODO(weight_dm_hp2): Mirrors HP0/HP1. Future descriptor manager should
+    # coordinate tags across HP lanes instead of relying on PS-issued commands.
+    create_bd_cell -type ip -vlnv $VLNV_DM weight_dm_hp2
+    pccx_config_datamover_mm2s weight_dm_hp2
+    create_bd_cell -type module -reference datamover_cmdsts_axil cmdsts_hp2
+    pccx_config_cmdsts_axil cmdsts_hp2
+
+    # TODO(weight_dm_hp3): Fourth weight lane. Keep topology symmetric until
+    # hardware evidence shows a reason to specialize burst or FIFO settings.
+    create_bd_cell -type ip -vlnv $VLNV_DM weight_dm_hp3
+    pccx_config_datamover_mm2s weight_dm_hp3
+    create_bd_cell -type module -reference datamover_cmdsts_axil cmdsts_hp3
+    pccx_config_cmdsts_axil cmdsts_hp3
+
+    # TODO(fmap_dm_acp): ACP is selected for PS<->NPU fmap latency. Confirm
+    # cacheability attributes and max burst after the board rebuild exercises
+    # realistic fmap descriptors.
+    create_bd_cell -type ip -vlnv $VLNV_DM fmap_dm_acp
+    pccx_config_datamover_mm2s fmap_dm_acp
+    create_bd_cell -type module -reference datamover_cmdsts_axil cmdsts_acp_fmap
+    pccx_config_cmdsts_axil cmdsts_acp_fmap
+
+    # TODO(result_dm_acp): Result write-back shares ACP with fmap. The current
+    # NPU wrapper exposes no AXIS TLAST/TKEEP, so BD ties TKEEP high and TLAST
+    # low until a descriptor-aware result framing adapter is reviewed.
+    create_bd_cell -type ip -vlnv $VLNV_DM result_dm_acp
+    pccx_config_datamover_s2mm result_dm_acp
+    create_bd_cell -type module -reference datamover_cmdsts_axil cmdsts_acp_result
+    pccx_config_cmdsts_axil cmdsts_acp_result
+
+    foreach cell {cmdsts_hp0 cmdsts_hp1 cmdsts_hp2 cmdsts_hp3 cmdsts_acp_fmap cmdsts_acp_result} {
+        connect_bd_net [get_bd_pins zynq_ps/pl_clk0]             [get_bd_pins $cell/s_axil_aclk]
+        connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]  [get_bd_pins $cell/s_axil_aresetn]
+    }
+
+    foreach dm {weight_dm_hp0 weight_dm_hp1 weight_dm_hp2 weight_dm_hp3 fmap_dm_acp} {
+        connect_bd_net [get_bd_pins zynq_ps/pl_clk0]             [get_bd_pins $dm/m_axi_mm2s_aclk]
+        connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]  [get_bd_pins $dm/m_axi_mm2s_aresetn]
+        connect_bd_net [get_bd_pins zynq_ps/pl_clk0]             [get_bd_pins $dm/m_axis_mm2s_cmdsts_aclk]
+        connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]  [get_bd_pins $dm/m_axis_mm2s_cmdsts_aresetn]
+    }
+    connect_bd_net [get_bd_pins zynq_ps/pl_clk0]                 [get_bd_pins result_dm_acp/m_axi_s2mm_aclk]
+    connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]      [get_bd_pins result_dm_acp/m_axi_s2mm_aresetn]
+    connect_bd_net [get_bd_pins zynq_ps/pl_clk0]                 [get_bd_pins result_dm_acp/m_axis_s2mm_cmdsts_awclk]
+    connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn]      [get_bd_pins result_dm_acp/m_axis_s2mm_cmdsts_aresetn]
+
+    connect_bd_net [get_bd_pins zynq_ps/pl_clk0]                 [get_bd_pins zynq_ps/saxihp0_fpd_aclk]
+    connect_bd_net [get_bd_pins zynq_ps/pl_clk0]                 [get_bd_pins zynq_ps/saxihp1_fpd_aclk]
+    connect_bd_net [get_bd_pins zynq_ps/pl_clk0]                 [get_bd_pins zynq_ps/saxihp2_fpd_aclk]
+    connect_bd_net [get_bd_pins zynq_ps/pl_clk0]                 [get_bd_pins zynq_ps/saxihp3_fpd_aclk]
+    connect_bd_net [get_bd_pins zynq_ps/pl_clk0]                 [get_bd_pins zynq_ps/saxiacp_fpd_aclk]
+    connect_bd_net [get_bd_pins const_iclear/dout]               [get_bd_pins zynq_ps/pl_acpinact]
+
+    connect_bd_intf_net [get_bd_intf_pins weight_dm_hp0/M_AXI_MM2S] [get_bd_intf_pins zynq_ps/S_AXI_HP0_FPD]
+    connect_bd_intf_net [get_bd_intf_pins weight_dm_hp1/M_AXI_MM2S] [get_bd_intf_pins zynq_ps/S_AXI_HP1_FPD]
+    connect_bd_intf_net [get_bd_intf_pins weight_dm_hp2/M_AXI_MM2S] [get_bd_intf_pins zynq_ps/S_AXI_HP2_FPD]
+    connect_bd_intf_net [get_bd_intf_pins weight_dm_hp3/M_AXI_MM2S] [get_bd_intf_pins zynq_ps/S_AXI_HP3_FPD]
+    connect_bd_intf_net [get_bd_intf_pins fmap_dm_acp/M_AXI_MM2S]   [get_bd_intf_pins sc_acp/S00_AXI]
+    connect_bd_intf_net [get_bd_intf_pins result_dm_acp/M_AXI_S2MM] [get_bd_intf_pins sc_acp/S01_AXI]
+    connect_bd_intf_net [get_bd_intf_pins sc_acp/M00_AXI]           [get_bd_intf_pins zynq_ps/S_AXI_ACP_FPD]
+    connect_bd_net      [get_bd_pins zynq_ps/pl_clk0]               [get_bd_pins sc_acp/aclk]
+    connect_bd_net      [get_bd_pins rst_axi/peripheral_aresetn]    [get_bd_pins sc_acp/aresetn]
+
+    connect_bd_intf_net [get_bd_intf_pins weight_dm_hp0/M_AXIS_MM2S] [get_bd_intf_pins u_npu/s_axis_hp0]
+    connect_bd_intf_net [get_bd_intf_pins weight_dm_hp1/M_AXIS_MM2S] [get_bd_intf_pins u_npu/s_axis_hp1]
+    connect_bd_intf_net [get_bd_intf_pins weight_dm_hp2/M_AXIS_MM2S] [get_bd_intf_pins u_npu/s_axis_hp2]
+    connect_bd_intf_net [get_bd_intf_pins weight_dm_hp3/M_AXIS_MM2S] [get_bd_intf_pins u_npu/s_axis_hp3]
+    connect_bd_intf_net [get_bd_intf_pins fmap_dm_acp/M_AXIS_MM2S]   [get_bd_intf_pins u_npu/s_axis_acp_fmap]
+    connect_bd_intf_net [get_bd_intf_pins u_npu/m_axis_acp_result]   [get_bd_intf_pins result_dm_acp/S_AXIS_S2MM]
+    connect_bd_net      [get_bd_pins const_axis_keep16/dout]         [get_bd_pins result_dm_acp/s_axis_s2mm_tkeep]
+    connect_bd_net      [get_bd_pins const_iclear/dout]              [get_bd_pins result_dm_acp/s_axis_s2mm_tlast]
+
+    connect_bd_intf_net [get_bd_intf_pins sc_axil/M01_AXI]           [get_bd_intf_pins cmdsts_hp0/s_axil]
+    connect_bd_intf_net [get_bd_intf_pins sc_axil/M02_AXI]           [get_bd_intf_pins cmdsts_hp1/s_axil]
+    connect_bd_intf_net [get_bd_intf_pins sc_axil/M03_AXI]           [get_bd_intf_pins cmdsts_hp2/s_axil]
+    connect_bd_intf_net [get_bd_intf_pins sc_axil/M04_AXI]           [get_bd_intf_pins cmdsts_hp3/s_axil]
+    connect_bd_intf_net [get_bd_intf_pins sc_axil/M05_AXI]           [get_bd_intf_pins cmdsts_acp_fmap/s_axil]
+    connect_bd_intf_net [get_bd_intf_pins sc_axil/M06_AXI]           [get_bd_intf_pins cmdsts_acp_result/s_axil]
+
+    connect_bd_intf_net [get_bd_intf_pins cmdsts_hp0/m_axis_cmd]      [get_bd_intf_pins weight_dm_hp0/S_AXIS_MM2S_CMD]
+    connect_bd_intf_net [get_bd_intf_pins weight_dm_hp0/M_AXIS_MM2S_STS] [get_bd_intf_pins cmdsts_hp0/s_axis_sts]
+    connect_bd_intf_net [get_bd_intf_pins cmdsts_hp1/m_axis_cmd]      [get_bd_intf_pins weight_dm_hp1/S_AXIS_MM2S_CMD]
+    connect_bd_intf_net [get_bd_intf_pins weight_dm_hp1/M_AXIS_MM2S_STS] [get_bd_intf_pins cmdsts_hp1/s_axis_sts]
+    connect_bd_intf_net [get_bd_intf_pins cmdsts_hp2/m_axis_cmd]      [get_bd_intf_pins weight_dm_hp2/S_AXIS_MM2S_CMD]
+    connect_bd_intf_net [get_bd_intf_pins weight_dm_hp2/M_AXIS_MM2S_STS] [get_bd_intf_pins cmdsts_hp2/s_axis_sts]
+    connect_bd_intf_net [get_bd_intf_pins cmdsts_hp3/m_axis_cmd]      [get_bd_intf_pins weight_dm_hp3/S_AXIS_MM2S_CMD]
+    connect_bd_intf_net [get_bd_intf_pins weight_dm_hp3/M_AXIS_MM2S_STS] [get_bd_intf_pins cmdsts_hp3/s_axis_sts]
+    connect_bd_intf_net [get_bd_intf_pins cmdsts_acp_fmap/m_axis_cmd] [get_bd_intf_pins fmap_dm_acp/S_AXIS_MM2S_CMD]
+    connect_bd_intf_net [get_bd_intf_pins fmap_dm_acp/M_AXIS_MM2S_STS] [get_bd_intf_pins cmdsts_acp_fmap/s_axis_sts]
+    connect_bd_intf_net [get_bd_intf_pins cmdsts_acp_result/m_axis_cmd] [get_bd_intf_pins result_dm_acp/S_AXIS_S2MM_CMD]
+    connect_bd_intf_net [get_bd_intf_pins result_dm_acp/M_AXIS_S2MM_STS] [get_bd_intf_pins cmdsts_acp_result/s_axis_sts]
 
     # FREQ_HZ propagation chicken-and-egg: BD only computes the propagated
     # frequencies *during* validate_bd_design, but validate_bd_design fails
@@ -502,6 +681,15 @@ if {![file exists $BD_FILE]} {
     # which causes SmartConnect to issue burst transactions that AXIL_CMD_IN
     # cannot service → bus hang on /dev/mem write. Force PROTOCOL=AXI4LITE.
     set_property CONFIG.PROTOCOL AXI4LITE [get_bd_intf_pins u_npu/s_axil]
+    foreach cell {cmdsts_hp0 cmdsts_hp1 cmdsts_hp2 cmdsts_hp3 cmdsts_acp_fmap cmdsts_acp_result} {
+        set_property CONFIG.FREQ_HZ    $_axi_freq   [get_bd_intf_pins $cell/s_axil]
+        set_property CONFIG.CLK_DOMAIN $_axi_domain [get_bd_intf_pins $cell/s_axil]
+        set_property CONFIG.PROTOCOL AXI4LITE       [get_bd_intf_pins $cell/s_axil]
+        foreach intf {m_axis_cmd s_axis_sts} {
+            set_property CONFIG.FREQ_HZ    $_axi_freq   [get_bd_intf_pins $cell/$intf]
+            set_property CONFIG.CLK_DOMAIN $_axi_domain [get_bd_intf_pins $cell/$intf]
+        }
+    }
     foreach intf {s_axis_acp_fmap m_axis_acp_result} {
         set_property CONFIG.FREQ_HZ    $_axi_freq   [get_bd_intf_pins u_npu/$intf]
         set_property CONFIG.CLK_DOMAIN $_axi_domain [get_bd_intf_pins u_npu/$intf]
@@ -512,14 +700,24 @@ if {![file exists $BD_FILE]} {
     }
 
     # PS-side address assignment for the AXI-Lite control register space.
-    # u_npu/s_axil/reg0 is the inferred segment from the wrapper stub.
-    assign_bd_address [get_bd_addr_segs {u_npu/s_axil/reg0}]
+    # Keep the deployed NPU control window at 0xA000_0000 and place each
+    # DataMover command/status helper in its own 4 KiB page.
+    foreach {seg offset} {
+        u_npu/s_axil/reg0                0xA0000000
+        cmdsts_hp0/s_axil/reg0          0xA0001000
+        cmdsts_hp1/s_axil/reg0          0xA0002000
+        cmdsts_hp2/s_axil/reg0          0xA0003000
+        cmdsts_hp3/s_axil/reg0          0xA0004000
+        cmdsts_acp_fmap/s_axil/reg0     0xA0005000
+        cmdsts_acp_result/s_axil/reg0   0xA0006000
+    } {
+        assign_bd_address -offset $offset -range 0x00001000 [get_bd_addr_segs $seg]
+    }
+    assign_bd_address
 
-    # Validate BD design but do NOT abort scaffold mode on warnings — many
-    # KV260 BD CRITICAL WARNINGs are about unconnected AXIS slaves which are
-    # intentional in scaffold mode (DMA wiring is human-review territory).
-    # Save the BD even if validate_bd_design issues warnings; the user can
-    # inspect via Vivado IPI GUI to confirm before running verify/closure_only.
+    # Validate BD design but do NOT abort scaffold mode on warnings. Save the
+    # BD even if validate_bd_design issues warnings; the next rebuild owner can
+    # inspect via Vivado IPI GUI before running verify/closure_only.
     if {[catch {validate_bd_design} _err]} {
         puts "\[pccx\] WARN: validate_bd_design reported issues:"
         puts "\[pccx\]   $_err"
@@ -527,18 +725,6 @@ if {![file exists $BD_FILE]} {
     } else {
         puts "\[pccx\] validate_bd_design clean."
     }
-
-    # ----------- HUMAN REVIEW REQUIRED FROM HERE ON -------------------------
-    # The four HP weight ports (S_AXIS_HP[0..3]_WEIGHT) and the ACP fmap/result
-    # ports require AXI DMA engines reading from PS DDR via HP/ACP. The exact
-    # topology depends on:
-    #   * Whether the host runtime drives DMAs directly (one DMA per HP) or
-    #     uses a shared DataMover + scheduler.
-    #   * How frame buffers are addressed in PS DDR.
-    #   * Whether the result write-back goes via ACP or HP4.
-    # The placeholders below leave the AXIS ports unconnected; BD validation
-    # will error until they are wired, which is the intended gate.
-    # ------------------------------------------------------------------------
 
     save_bd_design
 }
@@ -718,7 +904,7 @@ puts $fp "board_part_status=AVAILABLE"
 puts $fp "full_top_level_flow=$full_top_status"
 puts $fp "bitstream_status=$bitstream_status"
 puts $fp "blocker=$blocker"
-puts $fp "required_next_step=Connect AXI DMA engines for the four HP weight AXIS slaves and the ACP fmap/result AXIS ports. Decisions logged in system_bd.tcl HUMAN REVIEW REQUIRED block."
+puts $fp "required_next_step=Run BD rebuild/synth/impl to validate HP/ACP DataMover topology; descriptors are still PS-issued."
 close $fp
 
 puts "\[pccx\] system_bd status written to $status_file"
