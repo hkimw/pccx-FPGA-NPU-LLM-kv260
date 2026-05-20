@@ -271,10 +271,17 @@ def _submit_experimental_program(words: list[int]) -> None:
     raise TimeoutError("NPU program did not report DONE")
 
 
-def _submit_program_on_mmio(mmio: NpuMmio, words: list[int]) -> bool:
+def _submit_program_on_mmio(
+    mmio: NpuMmio,
+    words: list[int],
+    *,
+    wait_done: bool = True,
+) -> bool:
     for word in words:
         mmio.write64(AXIL_CMD_IN, word)
     mmio.write64(AXIL_CMD_KICK, 0x1)
+    if not wait_done:
+        return True
     deadline = time.monotonic() + NPU_TIMEOUT_SEC
     while time.monotonic() < deadline:
         status = mmio.read32(AXIL_STAT_OUT)
@@ -376,7 +383,7 @@ def _dispatch_gemm_readback(
                     shape_ptr_addr=out_shape_ptr,
                 ),
             ]
-            if not _submit_program_on_mmio(mmio, words):
+            if not _submit_program_on_mmio(mmio, words, wait_done=False):
                 raise TimeoutError("NPU GEMM program did not report DONE")
 
             channels["acp_fmap"].poll_status(fmap_token, DMA_TIMEOUT_SEC)
@@ -433,7 +440,7 @@ def _dispatch_matmul32_int4_int8(W: np.ndarray, X: np.ndarray) -> np.ndarray:
                     idx,
                     hp_buffers[name].size,
                 )
-                for idx, name in enumerate(("hp0", "hp1", "hp2", "hp3"), start=1)
+                for idx, name in enumerate(("hp0", "hp1"), start=1)
             }
 
             words = isa.encode_matmul32_int4_int8_program(
@@ -441,7 +448,7 @@ def _dispatch_matmul32_int4_int8(W: np.ndarray, X: np.ndarray) -> np.ndarray:
                 src_addr=src_addr,
                 shape_ptr_addr=shape_ptr,
             )
-            if not _submit_program_on_mmio(mmio, words):
+            if not _submit_program_on_mmio(mmio, words, wait_done=False):
                 raise TimeoutError("NPU matmul32 program did not report DONE")
 
             channels["acp_fmap"].poll_status(input_token, DMA_TIMEOUT_SEC)
