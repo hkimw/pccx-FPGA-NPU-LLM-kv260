@@ -39,7 +39,9 @@ async def health(request: web.Request) -> web.Response:
 
 async def status(request: web.Request) -> web.Response:
     state: ServerState = request.app[SERVER_STATE_KEY]
-    return web.json_response(status_payload(state))
+    payload = status_payload(state)
+    request.app[TRACE_EMITTER_KEY].emit("status", payload)
+    return web.json_response(payload)
 
 
 async def trace(request: web.Request) -> web.StreamResponse:

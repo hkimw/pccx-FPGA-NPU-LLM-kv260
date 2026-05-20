@@ -10,7 +10,7 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
 from aiohttp import WSMsgType, web
 
-from .app import SERVER_STATE_KEY, TRACE_EMITTER_KEY, ServerState
+from .app import SERVER_STATE_KEY, TRACE_EMITTER_KEY, ServerState, read_npu_status
 from .trace_emitter import TraceEmitter
 
 
@@ -27,6 +27,7 @@ async def chat(request: web.Request) -> web.WebSocketResponse:
         if msg.type == WSMsgType.TEXT:
             await _handle_text_frame(ws, state, emitter, msg.data)
         elif msg.type == WSMsgType.ERROR:
+            emitter.emit("ws_protocol_error", {"error_type": "websocket_error"})
             break
     return ws
 
@@ -40,12 +41,13 @@ async def _handle_text_frame(
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        await _send_error(ws, "invalid JSON", None)
+        await _send_error(ws, "invalid JSON", None, emitter, kind="ws_protocol_error")
         return
     session_id = str(payload.get("session_id") or uuid.uuid4())
     frame_type = payload.get("type")
     if frame_type == "reset":
         state.reset_session(session_id)
+        emitter.emit("session_reset", {"reset": True}, session_id=session_id)
         await ws.send_json(
             {
                 "type": "done",
@@ -58,14 +60,32 @@ async def _handle_text_frame(
         )
         return
     if frame_type != "user_message":
-        await _send_error(ws, "unsupported frame type", session_id)
+        await _send_error(
+            ws,
+            "unsupported frame type",
+            session_id,
+            emitter,
+            kind="ws_protocol_error",
+        )
         return
     content = str(payload.get("content") or "").strip()
     if not content:
-        await _send_error(ws, "content is required", session_id)
+        await _send_error(
+            ws,
+            "content is required",
+            session_id,
+            emitter,
+            kind="ws_protocol_error",
+        )
         return
     if not state.model_loaded:
-        await _send_error(ws, "model is not loaded", session_id)
+        await _send_error(
+            ws,
+            "model is not loaded",
+            session_id,
+            emitter,
+            kind="model_load_error",
+        )
         return
     await _stream_response(ws, state, emitter, payload, session_id, content)
 
@@ -83,10 +103,24 @@ async def _stream_response(
     temperature = _float(payload.get("temperature"), 0.7)
     top_p = _float(payload.get("top_p"), 0.95)
     max_new_tokens = max(1, min(_int(payload.get("max_new_tokens"), 128), 4096))
+    prompt_length_chars = len(content)
+    prompt_length_words = len(content.split())
     started = time.monotonic()
     chunks: List[str] = []
     tokens = 0
     finish_reason = "stop"
+    emitter.emit(
+        "inference_start",
+        {
+            "prompt_length_chars": prompt_length_chars,
+            "prompt_length_words": prompt_length_words,
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "backend": state.backend,
+        },
+        session_id=session_id,
+    )
     try:
         async for item in _generate_items(
             state.session,
@@ -125,12 +159,39 @@ async def _stream_response(
                 }
             )
     except Exception as exc:
-        await _send_error(ws, f"{type(exc).__name__}: {exc}", session_id)
+        await _send_error(
+            ws,
+            f"{type(exc).__name__}: {exc}",
+            session_id,
+            emitter,
+            kind="inference_exception",
+            data={"error_type": type(exc).__name__},
+        )
         return
     elapsed = max(time.monotonic() - started, 1e-9)
     tok_per_sec = tokens / elapsed
     state.tokens_per_sec_last = tok_per_sec
     state.append_turn(session_id, content, "".join(chunks))
+    metrics = state.record_inference(
+        session_id=session_id,
+        prompt_length_chars=prompt_length_chars,
+        max_new_tokens=max_new_tokens,
+        tokens=tokens,
+        elapsed_sec=elapsed,
+        finish_reason=finish_reason,
+    )
+    npu = state.annotate_npu_sample(read_npu_status())
+    emitter.emit(
+        "inference_done",
+        {
+            **metrics,
+            "npu_busy": npu["npu_busy"],
+            "npu_busy_duration_ms": npu["npu_busy_duration_ms"],
+            "npu_mmio_stat_hex": npu["npu_mmio_stat_hex"],
+            "npu_axil_command_count": npu["npu_axil_command_count"],
+        },
+        session_id=session_id,
+    )
     await ws.send_json(
         {
             "type": "done",
@@ -255,7 +316,16 @@ async def _send_error(
     ws: web.WebSocketResponse,
     message: str,
     session_id: Optional[str],
+    emitter: Optional[TraceEmitter] = None,
+    *,
+    kind: str = "ws_protocol_error",
+    data: Optional[Dict[str, Any]] = None,
 ) -> None:
+    if emitter is not None:
+        event_data = {"error_type": kind}
+        if data is not None:
+            event_data.update(data)
+        emitter.emit(kind, event_data, session_id=session_id)
     payload = {"type": "error", "message": message, "session_id": session_id or ""}
     await ws.send_json(payload)
 

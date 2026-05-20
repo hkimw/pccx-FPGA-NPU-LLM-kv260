@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from aiohttp import web
 
+from .telemetry import DmesgWatcher, TelemetrySink, collect_system_metrics
 from .trace_emitter import TraceEmitter
 
 
@@ -36,8 +37,13 @@ class ServerState:
     backend_requested: str = "auto"
     backend_reason: str = ""
     histories: Dict[str, List[Dict[str, str]]] = field(default_factory=dict)
+    session_metrics: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     tokens_total: int = 0
     tokens_per_sec_last: float = 0.0
+    latencies_ms: List[float] = field(default_factory=list)
+    npu_busy_started_at: Optional[float] = None
+    npu_busy_total_sec: float = 0.0
+    npu_last_mmio_stat_hex: str = "0x00000000"
 
     @property
     def model_loaded(self) -> bool:
@@ -74,7 +80,69 @@ class ServerState:
         )
         self.histories[session_id] = history[-16:]
 
-    async def load_model(self, model_path: str) -> None:
+    def record_inference(
+        self,
+        *,
+        session_id: str,
+        prompt_length_chars: int,
+        max_new_tokens: int,
+        tokens: int,
+        elapsed_sec: float,
+        finish_reason: str,
+    ) -> Dict[str, Any]:
+        latency_ms = elapsed_sec * 1000.0
+        self.latencies_ms.append(latency_ms)
+        if len(self.latencies_ms) > 1024:
+            del self.latencies_ms[:-1024]
+        tok_per_sec = tokens / max(elapsed_sec, 1e-9)
+        metrics = {
+            "prompt_length_chars": prompt_length_chars,
+            "max_new_tokens": max_new_tokens,
+            "tokens": tokens,
+            "elapsed_sec": round(elapsed_sec, 3),
+            "tokens_per_sec": round(tok_per_sec, 3),
+            "latency_ms": round(latency_ms, 3),
+            "latency_p50_ms": self.latency_p50_ms,
+            "latency_p99_ms": self.latency_p99_ms,
+            "finish_reason": finish_reason,
+        }
+        self.session_metrics[session_id] = metrics
+        return metrics
+
+    @property
+    def latency_p50_ms(self) -> float:
+        return _percentile(self.latencies_ms, 0.50)
+
+    @property
+    def latency_p99_ms(self) -> float:
+        return _percentile(self.latencies_ms, 0.99)
+
+    def annotate_npu_sample(self, npu: Dict[str, Any]) -> Dict[str, Any]:
+        now = time.monotonic()
+        busy = bool(npu["npu_busy"])
+        if busy and self.npu_busy_started_at is None:
+            self.npu_busy_started_at = now
+        elif not busy and self.npu_busy_started_at is not None:
+            self.npu_busy_total_sec += now - self.npu_busy_started_at
+            self.npu_busy_started_at = None
+
+        busy_total_sec = self.npu_busy_total_sec
+        if self.npu_busy_started_at is not None:
+            busy_total_sec += now - self.npu_busy_started_at
+
+        sample = dict(npu)
+        sample["npu_busy_duration_ms"] = round(busy_total_sec * 1000.0, 3)
+        sample["npu_mmio_stat_changed"] = (
+            sample["npu_mmio_stat_hex"] != self.npu_last_mmio_stat_hex
+        )
+        self.npu_last_mmio_stat_hex = sample["npu_mmio_stat_hex"]
+        return sample
+
+    async def load_model(
+        self,
+        model_path: str,
+        trace_emitter: Optional[TraceEmitter] = None,
+    ) -> None:
         self.model_path = model_path
         self.loading = True
         self.load_error = None
@@ -92,11 +160,21 @@ class ServerState:
             self.session = None
             self.load_error = f"{type(exc).__name__}: {exc}"
             self.backend_reason = str(exc)
+            if trace_emitter is not None:
+                trace_emitter.emit("model_load_error", {"error_type": type(exc).__name__})
         finally:
             started = self.load_started_at or time.monotonic()
             self.elapsed_load_sec = time.monotonic() - started
             self.load_started_at = None
             self.loading = False
+            if self.session is not None and trace_emitter is not None:
+                trace_emitter.emit(
+                    "model_load_done",
+                    {
+                        "elapsed_load_sec": round(self.elapsed_load_sec, 3),
+                        "backend": self.backend,
+                    },
+                )
 
     async def close_session(self) -> None:
         session = self.session
@@ -112,7 +190,11 @@ class ServerState:
 
 SERVER_STATE_KEY = web.AppKey("server_state", ServerState)
 TRACE_EMITTER_KEY = web.AppKey("trace_emitter", TraceEmitter)
+TELEMETRY_SINK_KEY = web.AppKey("telemetry_sink", TelemetrySink)
 MODEL_LOAD_TASK_KEY = web.AppKey("model_load_task", asyncio.Task)
+TELEMETRY_TASK_KEY = web.AppKey("telemetry_task", asyncio.Task)
+DMESG_WATCHER_KEY = web.AppKey("dmesg_watcher", DmesgWatcher)
+TELEMETRY_INTERVAL_KEY = web.AppKey("telemetry_interval_sec", float)
 
 
 @web.middleware
@@ -136,8 +218,15 @@ def create_app(
     port: int,
     model_path: Optional[str] = None,
     backend: str = "auto",
+    telemetry_dir: Optional[Path | str] = None,
+    telemetry_retention_days: int = 30,
+    telemetry_interval_sec: float = 30.0,
 ) -> web.Application:
     app = web.Application(middlewares=[_cors_middleware])
+    telemetry_sink = TelemetrySink.from_env(
+        directory=telemetry_dir,
+        retention_days=telemetry_retention_days,
+    )
     app[SERVER_STATE_KEY] = ServerState(
         session=session,
         host=host,
@@ -145,7 +234,10 @@ def create_app(
         model_path=os.path.expanduser(model_path) if model_path else None,
         backend_requested=backend,
     )
-    app[TRACE_EMITTER_KEY] = TraceEmitter()
+    app[TELEMETRY_SINK_KEY] = telemetry_sink
+    app[TRACE_EMITTER_KEY] = TraceEmitter(telemetry_sink=telemetry_sink)
+    app[DMESG_WATCHER_KEY] = DmesgWatcher()
+    app[TELEMETRY_INTERVAL_KEY] = telemetry_interval_sec
 
     from .routes_http import register_http_routes
     from .routes_ws import register_ws_routes
@@ -163,11 +255,35 @@ def create_app(
 
 async def _on_startup(app: web.Application) -> None:
     state: ServerState = app[SERVER_STATE_KEY]
+    emitter: TraceEmitter = app[TRACE_EMITTER_KEY]
+    sink: TelemetrySink = app[TELEMETRY_SINK_KEY]
+    emitter.emit(
+        "daemon_start",
+        {
+            "version": VERSION,
+            "telemetry_dir": "~/.local/state/pccx-kv260/telemetry",
+            "telemetry_file": sink.path.name,
+            "telemetry_retention_days": sink.retention_days,
+        },
+    )
     if state.session is None and state.model_path:
-        app[MODEL_LOAD_TASK_KEY] = asyncio.create_task(state.load_model(state.model_path))
+        emitter.emit("model_load_start", {"model_dir_set": True})
+        app[MODEL_LOAD_TASK_KEY] = asyncio.create_task(
+            state.load_model(state.model_path, emitter)
+        )
+    interval = app[TELEMETRY_INTERVAL_KEY]
+    if interval > 0:
+        app[TELEMETRY_TASK_KEY] = asyncio.create_task(_telemetry_loop(app, interval))
 
 
 async def _on_cleanup(app: web.Application) -> None:
+    telemetry_task = app.get(TELEMETRY_TASK_KEY)
+    if telemetry_task is not None and not telemetry_task.done():
+        telemetry_task.cancel()
+        try:
+            await telemetry_task
+        except asyncio.CancelledError:
+            pass
     task = app.get(MODEL_LOAD_TASK_KEY)
     if task is not None and not task.done():
         task.cancel()
@@ -208,24 +324,34 @@ def health_payload(state: ServerState) -> Dict[str, Any]:
 
 
 def status_payload(state: ServerState) -> Dict[str, Any]:
-    npu = read_npu_status()
+    npu = state.annotate_npu_sample(read_npu_status())
+    system = collect_system_metrics()
+    total_ram_mb = system["ram_total_mb"] or ram_mb()
     return {
         "model_id": state.model_id,
         "model_loaded": state.model_loaded,
         "session_count": len(state.histories),
         "tokens_total": state.tokens_total,
         "tokens_per_sec_last": round(state.tokens_per_sec_last, 3),
+        "latency_p50_ms": state.latency_p50_ms,
+        "latency_p99_ms": state.latency_p99_ms,
         "npu_mmio_stat_hex": npu["npu_mmio_stat_hex"],
         "npu_busy": npu["npu_busy"],
+        "npu_busy_duration_ms": npu["npu_busy_duration_ms"],
         "npu_done": npu["npu_done"],
         "npu_available": npu["npu_available"],
+        "npu_axil_command_count": npu["npu_axil_command_count"],
+        "npu_mmio_stat_changed": npu["npu_mmio_stat_changed"],
         "backend": state.backend,
         "backend_requested": state.backend_requested,
         "backend_reason": state.backend_reason,
         "uptime_sec": int(time.monotonic() - state.started_at),
         "bitstream_sha": bitstream_sha256(),
         "host": socket.gethostname(),
-        "ram_mb": ram_mb(),
+        "ram_mb": total_ram_mb,
+        "ram_used_mb": system["ram_used_mb"],
+        "cpu_load": system["cpu_load"],
+        "temperature_c": system["temperature_c"],
     }
 
 
@@ -235,6 +361,8 @@ def read_npu_status() -> Dict[str, Any]:
         "npu_busy": False,
         "npu_done": False,
         "npu_available": False,
+        "npu_axil_command_count": 0,
+        "npu_last_cycle_count": 0,
     }
     try:
         module = importlib.import_module("sw.runtime.npu")
@@ -248,6 +376,8 @@ def read_npu_status() -> Dict[str, Any]:
             "npu_busy": bool(stat & 0x1),
             "npu_done": bool(stat & 0x2),
             "npu_available": True,
+            "npu_axil_command_count": 0,
+            "npu_last_cycle_count": 0,
         }
     if isinstance(raw, dict):
         stat_value = raw.get("npu_mmio_stat_hex", raw.get("mmio_stat_hex"))
@@ -259,8 +389,28 @@ def read_npu_status() -> Dict[str, Any]:
             "npu_busy": bool(raw.get("npu_busy", raw.get("busy", stat & 0x1))),
             "npu_done": bool(raw.get("npu_done", raw.get("done", stat & 0x2))),
             "npu_available": bool(raw.get("npu_available", raw.get("available", True))),
+            "npu_axil_command_count": _parse_int_value(
+                raw.get(
+                    "npu_axil_command_count",
+                    raw.get("axil_command_count", raw.get("command_count", 0)),
+                )
+            ),
+            "npu_last_cycle_count": _parse_int_value(
+                raw.get("npu_last_cycle_count", raw.get("last_cycle_count", 0))
+            ),
         }
     return fallback
+
+
+async def _telemetry_loop(app: web.Application, interval: float) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        state: ServerState = app[SERVER_STATE_KEY]
+        emitter: TraceEmitter = app[TRACE_EMITTER_KEY]
+        emitter.emit("system_sample", status_payload(state))
+        watcher: DmesgWatcher = app[DMESG_WATCHER_KEY]
+        for event in await asyncio.to_thread(watcher.collect):
+            emitter.emit(event["kind"], event["data"])
 
 
 def bitstream_sha256(path: Path = BITSTREAM_PATH) -> str:
@@ -300,6 +450,21 @@ def _parse_stat_value(value: Any) -> int:
         return int(value) & 0xFFFF_FFFF
     except (TypeError, ValueError):
         return 0
+
+
+def _parse_int_value(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _percentile(values: List[float], quantile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * quantile)))
+    return round(ordered[index], 3)
 
 
 def _construct_gemma_session(model_path: str, backend: str = "auto") -> Any:

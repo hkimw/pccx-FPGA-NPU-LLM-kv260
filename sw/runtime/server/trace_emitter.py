@@ -7,6 +7,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Deque, Dict, List, Optional
 
+from .telemetry import TelemetrySink
+
 
 TraceEvent = Dict[str, Any]
 
@@ -25,10 +27,17 @@ class TraceEmitter:
     but it must not stall token generation if a browser tab stops reading.
     """
 
-    def __init__(self, *, max_events: int = 2048, queue_size: int = 512):
+    def __init__(
+        self,
+        *,
+        max_events: int = 2048,
+        queue_size: int = 512,
+        telemetry_sink: Optional[TelemetrySink] = None,
+    ):
         self._events: Deque[TraceEvent] = deque(maxlen=max_events)
         self._subscribers: List[_Subscriber] = []
         self._queue_size = queue_size
+        self._telemetry_sink = telemetry_sink
 
     def emit(
         self,
@@ -48,6 +57,11 @@ class TraceEmitter:
             "_session_id": session_id or payload.get("session_id"),
         }
         self._events.append(event)
+        if self._telemetry_sink is not None:
+            try:
+                self._telemetry_sink.write_trace_event(event)
+            except Exception:
+                pass
         for subscriber in list(self._subscribers):
             if not self._matches_session(event, subscriber.session_id):
                 continue
