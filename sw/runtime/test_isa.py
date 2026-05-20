@@ -62,6 +62,13 @@ def test_gemm_flags():
     assert (_body_of(w) >> 20) & 0x3F == 0b111_000
 
 
+def test_parallel_lane_count_uses_minus_one_encoding():
+    assert isa.encode_parallel_lane_count(1) == 0
+    assert isa.encode_parallel_lane_count(32) == 0x1F
+    assert isa.decode_parallel_lane_count(0) == 1
+    assert isa.decode_parallel_lane_count(0x1F) == 32
+
+
 def test_memcpy_fields():
     """memcpy: from(1) to(1) dest(17) src(17) aux(17) shape(6) async(1)."""
     w = isa.encode_memcpy(
@@ -139,6 +146,41 @@ def test_status_helpers():
     assert isa.status_done(0b00) is False
     assert isa.status_done(0b10) is True
     assert isa.status_done(0b11) is True
+
+
+def test_matmul32_int4_int8_program_fields():
+    words = isa.encode_matmul32_int4_int8_program(
+        dest_reg=512,
+        src_addr=100,
+        shape_ptr_addr=3,
+        weight_shape_ptr_addr=4,
+        flags=isa.GemmFlags(w_scale=True),
+    )
+
+    assert len(words) == 3
+    fmap_shape = isa.decode_memset(words[0])
+    weight_shape = isa.decode_memset(words[1])
+    gemm = isa.decode_gemm(words[2])
+    assert fmap_shape == {
+        "dest_cache": isa.DATA_TO_FMAP_SHAPE,
+        "dest_addr": 3,
+        "a_value": isa.MATMUL32_DIM,
+        "b_value": isa.MATMUL32_DIM,
+        "c_value": 1,
+    }
+    assert weight_shape == {
+        "dest_cache": isa.DATA_TO_WEIGHT_SHAPE,
+        "dest_addr": 4,
+        "a_value": isa.MATMUL32_DIM,
+        "b_value": isa.MATMUL32_DIM,
+        "c_value": 1,
+    }
+    assert gemm["dest_reg"] == 512
+    assert gemm["src_addr"] == 100
+    assert gemm["flags"] == isa.GemmFlags(w_scale=True)
+    assert isa.decode_parallel_lane_count(gemm["size_ptr_addr"]) == 32
+    assert isa.decode_parallel_lane_count(gemm["parallel_lane"]) == 32
+    assert gemm["shape_ptr_addr"] == 3
 
 
 # ----------------------------------------------------------------------------
@@ -295,6 +337,8 @@ def test_negative_value_rejected():
         isa.encode_memset(dest_cache=0, dest_addr=0, a_value=-1)
     with pytest.raises(ValueError):
         isa.encode_cvo(isa.CvoFunc.EXP, src_addr=-1, dst_addr=0, length=0)
+    with pytest.raises(ValueError):
+        isa.encode_parallel_lane_count(0)
 
 
 def test_off_by_one_max_plus_one_rejected():
@@ -314,6 +358,8 @@ def test_off_by_one_max_plus_one_rejected():
         isa.encode_memset(0, 0, 0x10000)                         # 16-bit + 1
     with pytest.raises(ValueError):
         isa.encode_cvo(isa.CvoFunc.EXP, 0, 0, length=0x10000)    # 16-bit + 1
+    with pytest.raises(ValueError):
+        isa.encode_parallel_lane_count(33)
 
 
 def test_kick_marker_is_not_a_valid_opcode_body():

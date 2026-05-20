@@ -39,11 +39,16 @@ GEMM_READBACK_ENV = "PCCX_NPU_ENABLE_GEMM_READBACK"
 GEMM_SHAPE_PTR_ENV = "PCCX_NPU_GEMM_SHAPE_PTR"
 GEMM_INPUT_L2_ENV = "PCCX_NPU_GEMM_INPUT_L2_ADDR"
 GEMM_OUTPUT_L2_ENV = "PCCX_NPU_GEMM_OUTPUT_L2_ADDR"
+INT4_INT8_MATMUL32_ENV = "PCCX_NPU_ENABLE_INT4_INT8_MATMUL32"
+MATMUL32_SHAPE_PTR_ENV = "PCCX_NPU_MATMUL32_SHAPE_PTR"
+MATMUL32_SRC_ADDR_ENV = "PCCX_NPU_MATMUL32_SRC_ADDR"
+MATMUL32_DEST_ADDR_ENV = "PCCX_NPU_MATMUL32_DEST_ADDR"
 FALLBACK_REASON = (
     "NPU UIO/bitstream is available, but high-level Gemma tensor dispatch "
     "still returns NumPy golden results; DMA buffer ownership and result "
     "readback are not enabled"
 )
+MATMUL32_DIM = 32
 
 _TRUTHY = {"1", "true", "yes", "on"}
 _CVO_FUNC_BY_NAME = {
@@ -88,6 +93,18 @@ def npu_gemm(
     except Exception as exc:
         LOG.warning("NPU GEMM dispatch failed; using CPU fallback: %s", exc)
     return _tiled_gemm_fallback(Wf, Xf)
+
+
+def npu_matmul_int4_int8(
+    W: np.ndarray,
+    X: np.ndarray,
+) -> np.ndarray:
+    """Run one Stage 1 32x32 signed INT4 x signed INT8 matmul on the NPU."""
+    Wi = _validate_matmul32_int4_weights(W)
+    Xi = _validate_matmul32_int8_activations(X)
+    if not _can_attempt_matmul32():
+        raise RuntimeError("NPU INT4 x INT8 matmul32 is not configured")
+    return _dispatch_matmul32_int4_int8(Wi, Xi)
 
 
 def npu_gemv(
@@ -167,24 +184,27 @@ def npu_backend_readiness() -> dict:
     available = npu_available()
     experimental_axil = _env_truthy("PCCX_NPU_EXPERIMENTAL_DISPATCH")
     gemm_readback = _gemm_readback_configured()
-    hardware_results = available and gemm_readback[0]
+    matmul32 = _matmul32_configured()
+    hardware_results = available and (gemm_readback[0] or matmul32[0])
+    supported_ops = []
+    if available and gemm_readback[0]:
+        supported_ops.append("gemm")
+    if available and matmul32[0]:
+        supported_ops.append("matmul32_int4_int8")
     if not available:
         reason = (
             "NPU UIO/bitstream is not available; Gemma tensor dispatch would "
             "use CPU fallback"
         )
-    elif not gemm_readback[0]:
-        reason = gemm_readback[1]
+    elif hardware_results:
+        reason = "NPU matmul hardware result path is configured"
     else:
-        reason = (
-            "NPU GEMM DMA buffer ownership and BF16 result readback are "
-            "configured; board result-path evidence is still required"
-        )
+        reason = f"{gemm_readback[1]}; {matmul32[1]}"
     return {
         "npu_available": available,
         "hardware_results": hardware_results,
         "experimental_axil_dispatch": experimental_axil,
-        "supported_ops": ["gemm"] if hardware_results else [],
+        "supported_ops": supported_ops,
         "backend_kind": "hybrid" if hardware_results else "cpu",
         "reason": reason,
     }
@@ -226,6 +246,16 @@ def _can_attempt_gemm_readback() -> bool:
     if not npu_available():
         return False
     ready, reason = _gemm_readback_configured()
+    if ready:
+        return True
+    LOG.info(reason)
+    return False
+
+
+def _can_attempt_matmul32() -> bool:
+    if not npu_available():
+        return False
+    ready, reason = _matmul32_configured()
     if ready:
         return True
     LOG.info(reason)
@@ -358,6 +388,75 @@ def _dispatch_gemm_readback(
         return _bf16_bytes_to_float32(output_buf.read(output_bytes), (batch, nout))
 
 
+def _dispatch_matmul32_int4_int8(W: np.ndarray, X: np.ndarray) -> np.ndarray:
+    reference_shape = (MATMUL32_DIM, MATMUL32_DIM)
+    input_bytes = _pad_128b(np.ascontiguousarray(X, dtype=np.int8).tobytes())
+    hp_bytes = _pack_matmul32_weight_lanes(W)
+    output_bytes = MATMUL32_DIM * MATMUL32_DIM * 4
+    shape_ptr = int(os.getenv(MATMUL32_SHAPE_PTR_ENV, "3"), 0) & 0x3F
+    src_addr = _env_int(MATMUL32_SRC_ADDR_ENV, 0)
+    dest_addr = _env_int(MATMUL32_DEST_ADDR_ENV, 512)
+
+    with open_dma_region_from_env() as region:
+        input_buf = region.allocate("matmul32_input_int8", len(input_bytes), alignment=64)
+        hp_buffers = {
+            name: region.allocate(f"matmul32_{name}_int4", len(data), alignment=64)
+            for name, data in hp_bytes.items()
+        }
+        output_buf = region.allocate("matmul32_output_int32", output_bytes, alignment=64)
+
+        input_buf.write(input_bytes)
+        for name, data in hp_bytes.items():
+            hp_buffers[name].write(data)
+        output_buf.write(bytes(output_bytes))
+
+        input_buf.sync_for_device()
+        for item in hp_buffers.values():
+            item.sync_for_device()
+        output_buf.sync_for_device()
+
+        with NpuMmio(uio=UIO_DEVICE_DEFAULT) as mmio:
+            channels = create_channels(mmio, discover_address_map())
+            result_token = channels["acp_result"].issue_command(
+                output_buf.phys_addr,
+                0x4,
+                output_buf.size,
+            )
+            input_token = channels["acp_fmap"].issue_command(
+                input_buf.phys_addr,
+                0x3,
+                input_buf.size,
+            )
+            hp_tokens = {
+                name: channels[name].issue_command(
+                    hp_buffers[name].phys_addr,
+                    idx,
+                    hp_buffers[name].size,
+                )
+                for idx, name in enumerate(("hp0", "hp1", "hp2", "hp3"), start=1)
+            }
+
+            words = isa.encode_matmul32_int4_int8_program(
+                dest_reg=dest_addr,
+                src_addr=src_addr,
+                shape_ptr_addr=shape_ptr,
+            )
+            if not _submit_program_on_mmio(mmio, words):
+                raise TimeoutError("NPU matmul32 program did not report DONE")
+
+            channels["acp_fmap"].poll_status(input_token, DMA_TIMEOUT_SEC)
+            for name, token in hp_tokens.items():
+                channels[name].poll_status(token, DMA_TIMEOUT_SEC)
+            channels["acp_result"].poll_status(result_token, DMA_TIMEOUT_SEC)
+
+        output_buf.sync_for_cpu()
+        raw = output_buf.read(output_bytes)
+        return np.frombuffer(raw, dtype="<i4").reshape(reference_shape).astype(
+            np.int32,
+            copy=False,
+        )
+
+
 def _tiled_gemm_fallback(W: np.ndarray, X: np.ndarray) -> np.ndarray:
     Wf = np.asarray(W, dtype=np.float32)
     Xf = np.asarray(X, dtype=np.float32)
@@ -424,6 +523,18 @@ def _gemm_readback_configured() -> tuple[bool, str]:
     return True, "GEMM readback configured"
 
 
+def _matmul32_configured() -> tuple[bool, str]:
+    if not _env_truthy(INT4_INT8_MATMUL32_ENV):
+        return False, f"{INT4_INT8_MATMUL32_ENV}=1 is required"
+    if not _dma_provider_configured():
+        return False, (
+            "INT4 x INT8 matmul32 requested, but no DMA-safe PS buffer "
+            f"provider is configured; set {DMA_DEVICE_ENV}, {DMA_PHYS_ENV}, "
+            f"and {DMA_SIZE_ENV}"
+        )
+    return True, "INT4 x INT8 matmul32 configured"
+
+
 def _dma_provider_configured() -> bool:
     if (
         os.getenv(DMA_DEVICE_ENV)
@@ -479,6 +590,18 @@ def _pack_int4_weight_lanes(W: np.ndarray) -> tuple[bytes, bytes]:
     return _pad_128b(hp0), _pad_128b(hp1)
 
 
+def _pack_matmul32_weight_lanes(W: np.ndarray) -> dict[str, bytes]:
+    flat = np.ascontiguousarray(np.asarray(W, dtype=np.int8)).reshape(-1)
+    hp0 = _pad_128b(_pack_int4_values(flat[0::2]))
+    hp1 = _pad_128b(_pack_int4_values(flat[1::2]))
+    return {
+        "hp0": hp0,
+        "hp1": hp1,
+        "hp2": hp0,
+        "hp3": hp1,
+    }
+
+
 def _pack_int4_values(values: np.ndarray) -> bytes:
     vals = np.asarray(values, dtype=np.int8).reshape(-1)
     if vals.size % 2:
@@ -491,6 +614,32 @@ def _pack_int4_values(values: np.ndarray) -> bytes:
 def _check_memset_dim(value: int, name: str) -> None:
     if value < 0 or value > 0xFFFF:
         raise ValueError(f"{name}={value} does not fit in the MEMSET shape field")
+
+
+def _validate_matmul32_int4_weights(value: np.ndarray) -> np.ndarray:
+    arr = np.asarray(value)
+    if arr.shape != (MATMUL32_DIM, MATMUL32_DIM):
+        raise ValueError("Stage 1 matmul weights must be 32x32")
+    rounded = np.rint(arr.astype(np.float32))
+    if not np.array_equal(rounded, arr.astype(np.float32)):
+        raise ValueError("Stage 1 matmul weights must contain integer values")
+    out = rounded.astype(np.int16)
+    if np.any(out < -8) or np.any(out > 7):
+        raise ValueError("Stage 1 matmul weights must be signed INT4")
+    return np.ascontiguousarray(out.astype(np.int8))
+
+
+def _validate_matmul32_int8_activations(value: np.ndarray) -> np.ndarray:
+    arr = np.asarray(value)
+    if arr.shape != (MATMUL32_DIM, MATMUL32_DIM):
+        raise ValueError("Stage 1 matmul activations must be 32x32")
+    rounded = np.rint(arr.astype(np.float32))
+    if not np.array_equal(rounded, arr.astype(np.float32)):
+        raise ValueError("Stage 1 matmul activations must contain integer values")
+    out = rounded.astype(np.int16)
+    if np.any(out < -128) or np.any(out > 127):
+        raise ValueError("Stage 1 matmul activations must be signed INT8")
+    return np.ascontiguousarray(out.astype(np.int8))
 
 
 def _env_int(name: str, default: int) -> int:

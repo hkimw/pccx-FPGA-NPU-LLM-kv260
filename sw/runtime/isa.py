@@ -40,6 +40,11 @@ TO_NPU,   TO_HOST   = 0, 1
 SYNC, ASYNC         = 0, 1
 
 
+DATA_TO_FMAP_SHAPE = 0
+DATA_TO_WEIGHT_SHAPE = 1
+MATMUL32_DIM = 32
+
+
 KICK_MARKER = 0x8000_0000_0000_0000
 
 
@@ -58,6 +63,19 @@ def _pack_opcode(opcode: Opcode, body: int) -> int:
     """body must already fit in 60 bits."""
     body = _check(body, 60, "body")
     return (int(opcode) & 0xF) << 60 | body
+
+
+def encode_parallel_lane_count(lane_count: int) -> int:
+    """Encode a 1..32 active-lane count into the 5-bit ISA lane field."""
+    lane_count = int(lane_count)
+    if lane_count < 1 or lane_count > 32:
+        raise ValueError("lane_count must be in [1, 32]")
+    return lane_count - 1
+
+
+def decode_parallel_lane_count(parallel_lane: int) -> int:
+    """Decode the 5-bit ISA lane field back into a 1..32 lane count."""
+    return _check(int(parallel_lane), 5, "parallel_lane") + 1
 
 
 @dataclass(frozen=True)
@@ -167,6 +185,46 @@ def encode_cvo(
             | (_check(flags,       5, "flags")       <<  1)
             | (_check(async_op,    1, "async_op")    <<  0))
     return _pack_opcode(Opcode.CVO, body)
+
+
+def encode_matmul32_int4_int8_program(
+    *,
+    dest_reg: int = 0,
+    src_addr: int = 0,
+    shape_ptr_addr: int = 3,
+    weight_shape_ptr_addr: int | None = None,
+    flags: GemmFlags = GemmFlags(),
+) -> list[int]:
+    """Encode the Stage 1 32x32 INT4 x INT8 matmul command sequence."""
+    shape_ptr = _check(shape_ptr_addr, 6, "shape_ptr_addr")
+    weight_shape_ptr = (
+        shape_ptr if weight_shape_ptr_addr is None
+        else _check(weight_shape_ptr_addr, 6, "weight_shape_ptr_addr")
+    )
+    return [
+        encode_memset(
+            DATA_TO_FMAP_SHAPE,
+            shape_ptr,
+            MATMUL32_DIM,
+            MATMUL32_DIM,
+            1,
+        ),
+        encode_memset(
+            DATA_TO_WEIGHT_SHAPE,
+            weight_shape_ptr,
+            MATMUL32_DIM,
+            MATMUL32_DIM,
+            1,
+        ),
+        encode_gemm(
+            dest_reg=dest_reg,
+            src_addr=src_addr,
+            flags=flags,
+            size_ptr_addr=encode_parallel_lane_count(MATMUL32_DIM),
+            shape_ptr_addr=shape_ptr,
+            parallel_lane=encode_parallel_lane_count(MATMUL32_DIM),
+        ),
+    ]
 
 
 # Status word (read from AXIL_STAT_OUT, 64-bit but only [31:0] is mmio_npu_stat)

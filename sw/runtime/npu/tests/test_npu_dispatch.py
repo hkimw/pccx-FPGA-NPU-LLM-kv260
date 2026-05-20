@@ -165,6 +165,19 @@ def test_int4_weight_lanes_are_signed_nibble_packed_and_padded():
     assert len(hp1) == 16
 
 
+def test_matmul32_weight_lanes_populate_all_hp_inputs():
+    W = ((np.arange(32 * 32, dtype=np.int16) % 16) - 8).reshape(32, 32)
+
+    lanes = npu_core._pack_matmul32_weight_lanes(W)
+
+    assert sorted(lanes) == ["hp0", "hp1", "hp2", "hp3"]
+    assert len({len(data) for data in lanes.values()}) == 1
+    assert len(lanes["hp1"]) == 256
+    assert all(any(data) for data in lanes.values())
+    assert lanes["hp2"] == lanes["hp0"]
+    assert lanes["hp3"] == lanes["hp1"]
+
+
 def test_gemm_readback_path_stages_dma_and_reads_bf16_result(monkeypatch):
     class FakeSlice:
         def __init__(self, name: str, offset: int, size: int) -> None:
@@ -260,3 +273,138 @@ def test_gemm_readback_path_stages_dma_and_reads_bf16_result(monkeypatch):
     np.testing.assert_allclose(out, np.array([[1.5, -2.0]], dtype=np.float32))
     assert fake_region.slices["gemm_input_bf16"].device_synced
     assert fake_region.slices["gemm_output_bf16"].cpu_synced
+
+
+def test_backend_readiness_reports_hybrid_when_matmul32_configured(monkeypatch):
+    monkeypatch.setattr(npu_core, "NPU_AVAILABLE", True)
+    monkeypatch.setenv(npu_core.INT4_INT8_MATMUL32_ENV, "1")
+    monkeypatch.setattr(npu_core, "_dma_provider_configured", lambda: True)
+
+    readiness = npu_core.npu_backend_readiness()
+
+    assert readiness["hardware_results"] is True
+    assert readiness["backend_kind"] == "hybrid"
+    assert "matmul32_int4_int8" in readiness["supported_ops"]
+
+
+def test_matmul32_dispatch_stages_dma_program_and_reads_int32_result(monkeypatch):
+    W = ((np.arange(32 * 32, dtype=np.int16) % 16) - 8).reshape(32, 32).astype(np.int8)
+    X = (((np.arange(32 * 32, dtype=np.int16) * 3) % 256) - 128).reshape(32, 32).astype(np.int8)
+    expected = X.astype(np.int32) @ W.astype(np.int32)
+    expected_bytes = np.ascontiguousarray(expected, dtype="<i4").tobytes()
+
+    class FakeSlice:
+        def __init__(self, name: str, offset: int, size: int) -> None:
+            self.name = name
+            self.offset = offset
+            self.size = size
+            self.phys_addr = 0x10000000 + offset
+            self.data = bytearray(size)
+            self.device_synced = False
+            self.cpu_synced = False
+
+        def write(self, data: bytes) -> None:
+            if self.name == "matmul32_output_int32" and not any(data):
+                return
+            self.data[: len(data)] = data
+
+        def read(self, size: int | None = None) -> bytes:
+            return bytes(self.data[: self.size if size is None else size])
+
+        def sync_for_device(self) -> None:
+            self.device_synced = True
+
+        def sync_for_cpu(self) -> None:
+            self.cpu_synced = True
+
+    class FakeRegion:
+        def __init__(self) -> None:
+            self.next_offset = 0
+            self.slices: dict[str, FakeSlice] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            pass
+
+        def allocate(self, name: str, size: int, *, alignment: int = 64) -> FakeSlice:
+            offset = ((self.next_offset + alignment - 1) // alignment) * alignment
+            self.next_offset = offset + size
+            item = FakeSlice(name, offset, size)
+            if name == "matmul32_output_int32":
+                item.write(expected_bytes)
+            self.slices[name] = item
+            return item
+
+    class FakeMmio:
+        instances: list["FakeMmio"] = []
+
+        def __init__(self, *args, **kwargs) -> None:
+            self.write64_values: list[tuple[int, int]] = []
+            self.write32_values: list[tuple[int, int]] = []
+            self.instances.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            pass
+
+        def write64(self, offset: int, value: int) -> None:
+            self.write64_values.append((offset, value))
+
+        def write32(self, offset: int, value: int) -> None:
+            self.write32_values.append((offset, value))
+
+        def read32(self, offset: int) -> int:
+            local = offset & 0xFFF
+            page = offset & 0xFFFFF000
+            if offset == address_map.AXIL_STAT_OUT:
+                return 0x2
+            if local == FLAGS:
+                return 0
+            if local == 0x010:
+                tag_by_page = {
+                    0x1000: 0x1,
+                    0x2000: 0x2,
+                    0x3000: 0x3,
+                    0x4000: 0x4,
+                    0x5000: 0x3,
+                    0x6000: 0x4,
+                }
+                return tag_by_page[page] << 4
+            return 0
+
+    fake_region = FakeRegion()
+    monkeypatch.setattr(npu_core, "_can_attempt_matmul32", lambda: True)
+    monkeypatch.setattr(npu_core, "open_dma_region_from_env", lambda: fake_region)
+    monkeypatch.setattr(npu_core, "NpuMmio", FakeMmio)
+    monkeypatch.setattr(
+        npu_core,
+        "discover_address_map",
+        address_map.compiled_default_address_map,
+    )
+
+    out = npu_core.npu_matmul_int4_int8(W, X)
+
+    np.testing.assert_array_equal(out, expected)
+    assert fake_region.slices["matmul32_input_int8"].device_synced
+    assert fake_region.slices["matmul32_output_int32"].device_synced
+    assert fake_region.slices["matmul32_output_int32"].cpu_synced
+    assert fake_region.slices["matmul32_input_int8"].read(32 * 32) == X.tobytes()
+
+    lanes = npu_core._pack_matmul32_weight_lanes(W)
+    for name, data in lanes.items():
+        item = fake_region.slices[f"matmul32_{name}_int4"]
+        assert item.device_synced
+        assert item.read(len(data)) == data
+
+    program = [
+        value
+        for offset, value in FakeMmio.instances[0].write64_values
+        if offset == address_map.AXIL_CMD_IN
+    ]
+    assert len(program) == 3
+    gemm = npu_core.isa.decode_gemm(program[2])
+    assert npu_core.isa.decode_parallel_lane_count(gemm["parallel_lane"]) == 32

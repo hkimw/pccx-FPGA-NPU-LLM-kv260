@@ -17,6 +17,7 @@ from .npu_core import (
     npu_cvo,
     npu_gemm,
     npu_gemv,
+    npu_matmul_int4_int8,
     npu_status,
 )
 
@@ -26,5 +27,6 @@ __all__ = [
     "npu_cvo",
     "npu_gemm",
     "npu_gemv",
+    "npu_matmul_int4_int8",
     "npu_status",
 ]
